@@ -10,7 +10,7 @@ env:
 on:
   # Run weekly on sunday at 21:37 UTC (arbitrary)
   schedule:
-  - cron: '37 21 * * SUN'
+  - cron: '0 6 * * *'
   workflow_dispatch:
     inputs:
       commit:
@@ -33,6 +33,8 @@ jobs:
   schedule_environment:
     name: Create default build environment
     runs-on: ubuntu-latest
+    env:
+      RUNNER_VERSION: "2.320.0"
     if: ${{ github.event_name == 'schedule' }}
     steps:
     - name: Install deps
@@ -77,6 +79,8 @@ jobs:
   workflow_dispatch_environment:
     name: Use inputs to create build environment
     runs-on: ubuntu-latest
+    env:
+      RUNNER_VERSION: "2.320.0"
     if: ${{ github.event_name == 'workflow_dispatch' }}
     steps:
     - name: Use repo and commit from the inputs
