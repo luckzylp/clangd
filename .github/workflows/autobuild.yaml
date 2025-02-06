@@ -8,7 +8,7 @@ name: Build release binaries
 env:
   ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: true
 on:
-  # Run every day at 06：00 UTC (arbitrary)
+  # Run everyday at 06:00 UTC (arbitrary)
   schedule:
   - cron: '00 06 * * *'
   workflow_dispatch:
@@ -354,8 +354,8 @@ jobs:
         asset_path: indexing-tools.zip
         asset_content_type: application/zip
     - name: Check binary compatibility
-  #   if: matrix.config.name == 'linux'
-  #   run: .github/workflows/lib_compat_test.py --lib=GLIBC_2.18 "$CLANGD_DIR/bin/clangd"
+      if: matrix.config.name == 'linux'
+      run: .github/workflows/lib_compat_test.py --lib=GLIBC_2.29 "$CLANGD_DIR/bin/clangd"
   # Create the release, and upload the artifacts to it.
   finalize:
     runs-on: ubuntu-latest
