@@ -8,9 +8,9 @@ name: Build release binaries
 env:
   ACTIONS_ALLOW_USE_UNSECURE_NODE_VERSION: true
 on:
-  # Run everyday at 06:00 UTC (arbitrary)
+  # Run everyday at 11:00 UTC (arbitrary)
   schedule:
-  - cron: '00 06 * * *'
+  - cron: '00 11 * * *'
   workflow_dispatch:
     inputs:
       commit:
