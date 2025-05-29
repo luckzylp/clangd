@@ -19,7 +19,7 @@ on:
       repo:
         description: 'Repository to build from'
         required: true
-        default: 'llvm/llvm-project'
+        default: 'luckzylp/llvm-project'
       release_name:
         description: 'Release name'
         required: true
@@ -50,7 +50,7 @@ jobs:
     - name: Get commit hash for LLVM head
       run: >
         COMMIT=$(curl --fail --show-error
-        "https://api.github.com/repos/llvm/llvm-project/commits/main" |
+        "https://api.github.com/repos/luckzylp/llvm-project/commits/main" |
         jq ".sha" -r)
 
         echo "LLVM_COMMIT=$COMMIT" >> $GITHUB_ENV
@@ -58,7 +58,7 @@ jobs:
       run: |
         echo "RELEASE_COMMIT_SHORT=$(printf '%.12s' ${{ env.LLVM_COMMIT }})" >> $GITHUB_ENV
         echo "RELEASE_DATE=$(date -u +%Y%m%d)" >> $GITHUB_ENV
-        echo "LLVM_REPO=llvm/llvm-project" >> commit.env
+        echo "LLVM_REPO=luckzylp/llvm-project" >> commit.env
         echo "LLVM_COMMIT=${{ env.LLVM_COMMIT }}" >> commit.env
     - name: Use date as the tag name
       run: >
