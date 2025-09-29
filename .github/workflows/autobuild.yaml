@@ -165,7 +165,7 @@ jobs:
               brew install ninja zlib p7zip &&
               brew uninstall cmake &&
               brew install botantony/cmake3/cmake3 &&
-              echo 'export PATH="$(brew --prefix cmake3)/bin:${PATH}"' >> /Users/runner/.bash_profile
+              echo 'export PATH="$(brew --prefix cmake3)/bin:${PATH}"' >> /Users/runner/.zshrc
 
             cflags: -O3 -gline-tables-only -DNDEBUG
             cmake: >-
