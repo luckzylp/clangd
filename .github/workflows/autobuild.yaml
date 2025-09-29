@@ -162,10 +162,11 @@ jobs:
           - name: mac
             os: macos-13
             preinstall: >-
-              brew install ninja zlib p7zip && brew search cmake
-          # brew uninstall cmake && brew search cmake
-          # curl -O https://github.com/Kitware/CMake/releases/download/v3.31.9/cmake-3.31.9-macos-universal.dmg &&
-          # open cmake-3.31.9-macos-universal.dmg
+              brew install ninja zlib p7zip &&
+              brew uninstall cmake &&
+              brew install botantony/cmake3/cmake3 &&
+              echo 'export PATH="$(brew --prefix cmake3)/bin:${PATH}"' >> /Users/runner/.bash_profile
+
             cflags: -O3 -gline-tables-only -DNDEBUG
             cmake: >-
               "-DCMAKE_C_COMPILER=clang"
