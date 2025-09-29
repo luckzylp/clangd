@@ -163,10 +163,8 @@ jobs:
             os: macos-13
             preinstall: >-
               brew install ninja zlib p7zip &&
-              brew tap wilsonCernWq/cmake &&
-              brew install cmake@3.31 &&
-              brew unlink cmake &&
-              brew link cmake@3.31
+              brew uninstall cmake &&
+              brew install botantony/cmake3/cmake3
             cflags: -O3 -gline-tables-only -DNDEBUG
             cmake: >-
               "-DCMAKE_C_COMPILER=clang"
