@@ -164,7 +164,8 @@ jobs:
             preinstall: >-
               brew install ninja zlib p7zip &&
               brew uninstall cmake &&
-              brew install botantony/cmake3/cmake3
+              brew install botantony/cmake3/cmake3 &&
+              echo 'export PATH="/usr/local/opt/cmake3/bin:$PATH"' >> /Users/runner/.bash_profile
             cflags: -O3 -gline-tables-only -DNDEBUG
             cmake: >-
               "-DCMAKE_C_COMPILER=clang"
