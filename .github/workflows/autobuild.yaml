@@ -163,9 +163,12 @@ jobs:
             os: macos-13
             preinstall: >-
               brew install ninja zlib p7zip &&
-              brew uninstall cmake &&
-              brew install botantony/cmake3/cmake3 &&
-              echo 'export PATH="$(brew --prefix cmake3)/bin:${PATH}"' >> /Users/runner/.zshrc
+              brew uninstall cmake && 
+              curl -L -o cmake.tar.gz "https://github.com/Kitware/CMake/releases/download/v3.31.9/cmake-3.31.9-macos-universal.tar.gz" && 
+              sudo mkdir -p /usr/local/ && 
+              sudo tar xzf cmake.tar.gz -C /usr/local/ --strip-components=1 && 
+              rm cmake.tar.gz && 
+              cmake --version
 
             cflags: -O3 -gline-tables-only -DNDEBUG
             cmake: >-
