@@ -3,11 +3,17 @@
 # This workflow is additive: it does not modify, reuse or depend on
 # autobuild.yaml or winget.yml. Targets:
 #
-#   linux-x86_64    built inside an Ubuntu 20.04 container and gated so the
-#                   resulting binary only needs glibc 2.17 or older
-#                   (lib_compat.h forces old symbol versions, and
-#                   lib_compat_test.py --lib=GLIBC_2.17 fails the build if
-#                   anything newer sneaks in).
+#   linux-x86_64    built inside an Ubuntu 20.04 container, using exactly the
+#                   same old-glibc scheme as autobuild.yaml:
+#                     - lib_compat.h pins the libm symbols to GLIBC_2.2.5
+#                     - -static-libgcc + LLVM_STATIC_LINK_CXX_STDLIB=ON
+#                     - LLVM_ENABLE_ZLIB=FORCE_ON with linux-static-deps.cmake
+#                       forcing the static libz.a
+#                     - lib_compat_test.py --lib=GLIBC_2.18, the same
+#                       whitelist the original workflow enforces
+#                   GLIBC_2.18 only added __cxa_thread_atexit_impl, which is a
+#                   weak reference, so the resulting binary still runs on
+#                   systems with glibc 2.17.
 #   linux-aarch64   built natively on an Ubuntu 24.04 arm64 runner.
 #   windows-x86_64  built natively with MSVC on windows-2022.
 #   winarm64        built natively with MSVC on a Windows 11 arm64 runner.
@@ -111,10 +117,11 @@ jobs:
         - name: linux-x86_64
           os: ubuntu-24.04
           container: ubuntu:20.04
-          # Ubuntu 20.04 (glibc 2.31) plus the compat header below: clangd only
-          # uses glibc symbols that already existed in 2.17, and the symbol
-          # version forcing keeps it that way. The build is gated afterwards by
-          # lib_compat_test.py --lib=GLIBC_2.17.
+          # Same approach as autobuild.yaml: build in a container whose glibc
+          # is old enough that clangd does not pick up newer symbols, force the
+          # few libm symbols that would otherwise be versioned higher via
+          # lib_compat.h, link libstdc++/libgcc statically, and force the static
+          # libz.a so nothing new leaks into the dynamic dependency list.
           preinstall: >-
             apt-get update &&
             apt-get install -y ninja-build libz-dev libc-ares-dev wget clang-12
@@ -140,8 +147,10 @@ jobs:
           # libraries. All other gRPC dependencies can be built from sources.
           grpc_cmake: >-
             "-DgRPC_CARES_PROVIDER=package"
-          # Only this target is checked against a glibc symbol whitelist.
-          compat_lib: GLIBC_2.17
+          # Same whitelist as autobuild.yaml. GLIBC_2.18's only addition is
+          # __cxa_thread_atexit_impl, referenced weakly, so this still yields a
+          # binary usable on glibc 2.17 systems.
+          compat_lib: GLIBC_2.18
           exe: ""
         - name: linux-aarch64
           os: ubuntu-24.04-arm
@@ -338,12 +347,12 @@ jobs:
       run: >
         ninja -C ${{ env.CLANGD_DIR }} clangd clangd-indexer clangd-index-server
         clangd-index-server-monitor runtimes
-    # The glibc requirement is contractual for the linux x86_64 build, so fail
-    # the job instead of shipping a binary that needs a newer glibc. If this
-    # step ever fails, it prints the offending symbol@version pairs: either
-    # force an older version in .github/workflows/lib_compat.h or stop using
-    # the feature that pulls the new symbol in.
-    - name: Check glibc symbol versions (must be <= 2.17)
+    # Same check as the original workflow's "Check binary compatibility" step,
+    # run before archiving so a bad binary never even becomes an artifact. If
+    # it fails it prints the offending symbol@version pairs: force an older
+    # version in lib_compat.h, or stop using the feature that pulls the newer
+    # symbol in.
+    - name: Check binary compatibility
       if: matrix.config.name == 'linux-x86_64'
       shell: bash
       run: >
@@ -418,7 +427,7 @@ jobs:
 
         | target | notes |
         | --- | --- |
-        | linux-x86_64 | requires glibc >= 2.17 |
+        | linux-x86_64 | built with lib_compat.h, runs on glibc 2.17+ |
         | linux-aarch64 | built on Ubuntu 24.04 |
         | windows-x86_64 | MSVC, static CRT |
         | winarm64 | MSVC, static CRT, arm64 |
