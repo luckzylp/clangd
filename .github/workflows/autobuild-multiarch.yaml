@@ -161,6 +161,11 @@ jobs:
           # Noble ships CMake 3.28, below the 3.31 LLVM now requires.
           cmake_url: https://github.com/Kitware/CMake/releases/download/v3.31.6/cmake-3.31.6-linux-aarch64.tar.gz
           cflags: -O3 -gline-tables-only -DNDEBUG
+          # gRPC's CMake config looks up absl / c-ares / re2 / protobuf in
+          # config mode without REQUIRED, so a miss surfaces later as
+          # "link interface contains absl::strings but the target was not
+          # found" inside gRPCTargets.cmake. Point CMAKE_PREFIX_PATH at the
+          # gRPC install prefix so every sibling dependency resolves.
           cmake: >-
             "-DCMAKE_C_COMPILER=clang-18"
             "-DCMAKE_CXX_COMPILER=clang++-18"
@@ -168,7 +173,7 @@ jobs:
             "-DLLVM_STATIC_LINK_CXX_STDLIB=ON"
             "-DLLVM_ENABLE_ZLIB=FORCE_ON"
             "-DCMAKE_PROJECT_INCLUDE=$GITHUB_WORKSPACE/.github/workflows/linux-static-deps.cmake"
-            "-Dabsl_DIR=$HOME/grpc-installation/lib/cmake/absl"
+            "-DCMAKE_PREFIX_PATH=$HOME/grpc-installation"
           # Newer gRPC: the pinned v1.36.3 predates arm64 support and its
           # bundled abseil does not compile with GCC 13 / libstdc++ 13.
           grpc_version: v1.62.2
@@ -208,6 +213,7 @@ jobs:
             "-DLLVM_ENABLE_PDB=ON"
             "-DLLVM_PARALLEL_LINK_JOBS=1"
             "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"
+            "-DCMAKE_PREFIX_PATH=$HOME/grpc-installation"
           grpc_version: v1.62.2
           # BoringSSL has no arm64 Windows assembler path under MSVC.
           grpc_cmake: >-
@@ -218,7 +224,7 @@ jobs:
           os: macos-15
           preinstall: brew install ninja zlib p7zip
           # The image's CMake is 4.4.x, which rejects the cmake_minimum_required
-          # of the older gRPC release we build against. Pin 3.31 instead.
+          # of older gRPC releases. Pin 3.31 instead.
           cmake_url: https://github.com/Kitware/CMake/releases/download/v3.31.6/cmake-3.31.6-macos-universal.tar.gz
           cflags: -O3 -gline-tables-only -DNDEBUG
           cmake: >-
@@ -228,8 +234,12 @@ jobs:
             "-DCMAKE_OSX_ARCHITECTURES=x86_64;arm64"
             "-DCMAKE_OSX_DEPLOYMENT_TARGET=10.13"
             "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"
-            "-Dabsl_DIR=$HOME/grpc-installation/lib/cmake/absl"
-          grpc_version: v1.51.3
+            "-DCMAKE_PREFIX_PATH=$HOME/grpc-installation"
+          # v1.51.3 was the oldest release that worked on macos-14, but its
+          # bundled abseil (20220623) no longer compiles with the Xcode that
+          # macos-15 ships, and building it failed outright. Use the same
+          # release the arm64 targets use.
+          grpc_version: v1.62.2
           # BoringSSL doesn't support universal binaries when building with ASM.
           grpc_cmake: >-
             "-DOPENSSL_NO_ASM=ON"
