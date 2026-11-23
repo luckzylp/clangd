@@ -1,0 +1,401 @@
+# Build clangd release binaries for every supported OS/architecture.
+#
+# This workflow is additive: it does not modify, reuse or depend on
+# autobuild.yaml or winget.yml. Targets:
+#
+#   linux-x86_64    built inside an Ubuntu 20.04 container and gated so the
+#                   resulting binary only needs glibc 2.17 or older
+#                   (lib_compat.h forces old symbol versions, and
+#                   lib_compat_test.py --lib=GLIBC_2.17 fails the build if
+#                   anything newer sneaks in).
+#   linux-aarch64   built natively on an Ubuntu 24.04 arm64 runner.
+#   windows-x86_64  built natively with MSVC on windows-2022.
+#   winarm64        built natively with MSVC on a Windows 11 arm64 runner.
+#   macos           built on the macOS 15 image as a universal x86_64+arm64
+#                   binary.
+#
+# Builds are published as workflow artifacts. When `release_tag` is given, a
+# single short job at the end attaches them to a GitHub release. Doing the
+# upload in a separate job (instead of from each long-running build job)
+# avoids the "token expired after one hour" problem that release uploads from
+# multi-hour build jobs run into.
+#
+# Asset naming note: assets that would collide with the winget publishing
+# workflow (which looks for `clangd-windows-*.zip`) are kept unique. Only the
+# x86_64 Windows archive starts with `clangd-windows-`; the arm64 one is
+# published as `clangd-winarm64-*` so winget keeps picking the x64 build.
+name: Build multi-arch release binaries
+
+on:
+  # Run weekly on sunday at 21:37 UTC (arbitrary, same slot as autobuild.yaml).
+  schedule:
+  - cron: '37 21 * * SUN'
+  workflow_dispatch:
+    inputs:
+      llvm_repo:
+        description: 'LLVM repository to build from (owner/name)'
+        required: false
+        default: 'llvm/llvm-project'
+      llvm_commit:
+        description: 'LLVM commit SHA (default: tip of the default branch)'
+        required: false
+        default: ''
+      release_tag:
+        description: 'Publish a GitHub release under this tag (default: artifacts only)'
+        required: false
+        default: ''
+      release_name:
+        description: 'Release title (default: "<date> @<short commit>")'
+        required: false
+        default: ''
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  prepare:
+    name: Resolve build inputs
+    runs-on: ubuntu-latest
+    outputs:
+      llvm_repo: ${{ steps.resolve.outputs.llvm_repo }}
+      llvm_commit: ${{ steps.resolve.outputs.llvm_commit }}
+      tag_name: ${{ steps.resolve.outputs.tag_name }}
+      release_tag: ${{ steps.resolve.outputs.release_tag }}
+      release_name: ${{ steps.resolve.outputs.release_name }}
+    steps:
+    - name: Resolve repository, commit and tag
+      id: resolve
+      shell: bash
+      env:
+        INPUT_REPO: ${{ github.event.inputs.llvm_repo }}
+        INPUT_COMMIT: ${{ github.event.inputs.llvm_commit }}
+        INPUT_RELEASE_TAG: ${{ github.event.inputs.release_tag }}
+        INPUT_RELEASE_NAME: ${{ github.event.inputs.release_name }}
+      run: |
+        set -euo pipefail
+        repo="${INPUT_REPO:-llvm/llvm-project}"
+        commit="${INPUT_COMMIT:-}"
+        if [ -z "$commit" ]; then
+          for branch in main master; do
+            commit="$(curl -fsSL "https://api.github.com/repos/${repo}/commits/${branch}" |
+              jq -r '.sha // empty' || true)"
+            [ -n "$commit" ] && break
+          done
+        fi
+        if [ -z "$commit" ]; then
+          echo "::error::Could not resolve the LLVM commit for ${repo}"
+          exit 1
+        fi
+        date="$(date -u +%Y%m%d)"
+        tag="${INPUT_RELEASE_TAG:-snapshot_${date}}"
+        name="${INPUT_RELEASE_NAME:-${date} @$(printf '%.12s' "$commit")}"
+        {
+          echo "llvm_repo=${repo}"
+          echo "llvm_commit=${commit}"
+          echo "tag_name=${tag}"
+          echo "release_tag=${INPUT_RELEASE_TAG:-}"
+          echo "release_name=${name}"
+        } >>"$GITHUB_OUTPUT"
+        cat "$GITHUB_OUTPUT"
+
+  build:
+    name: ${{ matrix.config.name }}
+    needs: prepare
+    runs-on: ${{ matrix.config.os }}
+    container: ${{ matrix.config.container }}
+    strategy:
+      fail-fast: false
+      matrix:
+        config:
+        - name: linux-x86_64
+          os: ubuntu-24.04
+          container: ubuntu:20.04
+          # Ubuntu 20.04 (glibc 2.31) plus the compat header below: clangd only
+          # uses glibc symbols that already existed in 2.17, and the symbol
+          # version forcing keeps it that way. The build is gated afterwards by
+          # lib_compat_test.py --lib=GLIBC_2.17.
+          preinstall: >-
+            apt-get update &&
+            apt-get install -y ninja-build libz-dev libc-ares-dev wget clang-12
+            software-properties-common p7zip-full curl binutils python3 &&
+            add-apt-repository ppa:git-core/ppa &&
+            wget -O - https://apt.kitware.com/keys/kitware-archive-latest.asc 2>/dev/null | apt-key add - &&
+            apt-add-repository 'deb https://apt.kitware.com/ubuntu/ bionic main' &&
+            apt-get update &&
+            apt-get install -y git cmake python3.8 python3.8-dev
+          cflags: -O3 -gline-tables-only -DNDEBUG -include $GITHUB_WORKSPACE/.github/workflows/lib_compat.h
+          # clang-12 rather than clang-10: current LLVM no longer builds with
+          # the focal default toolchain.
+          cmake: >-
+            "-DCMAKE_C_COMPILER=clang-12"
+            "-DCMAKE_CXX_COMPILER=clang++-12"
+            "-DCMAKE_EXE_LINKER_FLAGS_RELEASE=-static-libgcc -Wl,--compress-debug-sections=zlib"
+            "-DLLVM_STATIC_LINK_CXX_STDLIB=ON"
+            "-DLLVM_ENABLE_ZLIB=FORCE_ON"
+            "-DCMAKE_PROJECT_INCLUDE=$GITHUB_WORKSPACE/.github/workflows/linux-static-deps.cmake"
+          grpc_version: v1.36.3
+          # Using c-ares as a module prevents dynamic linking of unneeded
+          # libraries. All other gRPC dependencies can be built from sources.
+          grpc_cmake: >-
+            "-DgRPC_CARES_PROVIDER=package"
+          # Only this target is checked against a glibc symbol whitelist.
+          compat_lib: GLIBC_2.17
+          exe: ""
+        - name: linux-aarch64
+          os: ubuntu-24.04-arm
+          preinstall: >-
+            sudo apt-get update &&
+            sudo apt-get install -y ninja-build zlib1g-dev libstdc++-13-dev
+            p7zip-full cmake clang-18 python3 curl
+          cflags: -O3 -gline-tables-only -DNDEBUG
+          cmake: >-
+            "-DCMAKE_C_COMPILER=clang-18"
+            "-DCMAKE_CXX_COMPILER=clang++-18"
+            "-DCMAKE_EXE_LINKER_FLAGS_RELEASE=-static-libgcc -Wl,--compress-debug-sections=zlib"
+            "-DLLVM_STATIC_LINK_CXX_STDLIB=ON"
+            "-DLLVM_ENABLE_ZLIB=FORCE_ON"
+            "-DCMAKE_PROJECT_INCLUDE=$GITHUB_WORKSPACE/.github/workflows/linux-static-deps.cmake"
+            "-Dabsl_DIR=$HOME/grpc-installation/lib/cmake/absl"
+          # Newer gRPC: the pinned v1.36.3 predates arm64 support and its
+          # bundled abseil does not compile with GCC 13 / libstdc++ 13.
+          grpc_version: v1.62.2
+          grpc_cmake: >-
+            "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"
+          exe: ""
+        - name: windows-x86_64
+          os: windows-2022
+          preinstall: choco install ninja nasm
+          msvc_arch: x64
+          msvc_component: x86.x64
+          cflags: /O2 /DNDEBUG
+          cmake: >-
+            "-DCMAKE_C_COMPILER=cl"
+            "-DCMAKE_CXX_COMPILER=cl"
+            "-DLLVM_ENABLE_ZLIB=OFF"
+            "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded"
+            "-DLLVM_ENABLE_PDB=ON"
+            "-DLLVM_PARALLEL_LINK_JOBS=1"
+          grpc_version: v1.36.3
+          grpc_cmake: >-
+            "-DgRPC_MSVC_STATIC_RUNTIME=ON"
+          exe: ".exe"
+        - name: winarm64
+          # Pinned to the VS2026 image explicitly: the plain `windows-11-arm`
+          # label had no Visual Studio at all before it was re-pointed at this
+          # image, so use the explicit label to stay deterministic.
+          os: windows-11-vs2026-arm
+          msvc_arch: arm64
+          msvc_component: ARM64
+          cflags: /O2 /DNDEBUG
+          cmake: >-
+            "-DCMAKE_C_COMPILER=cl"
+            "-DCMAKE_CXX_COMPILER=cl"
+            "-DLLVM_ENABLE_ZLIB=OFF"
+            "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded"
+            "-DLLVM_ENABLE_PDB=ON"
+            "-DLLVM_PARALLEL_LINK_JOBS=1"
+            "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"
+          grpc_version: v1.62.2
+          # BoringSSL has no arm64 Windows assembler path under MSVC.
+          grpc_cmake: >-
+            "-DgRPC_MSVC_STATIC_RUNTIME=ON"
+            "-DOPENSSL_NO_ASM=ON"
+          exe: ".exe"
+        - name: macos
+          os: macos-15
+          preinstall: brew install ninja zlib p7zip
+          cflags: -O3 -gline-tables-only -DNDEBUG
+          cmake: >-
+            "-DCMAKE_C_COMPILER=clang"
+            "-DCMAKE_CXX_COMPILER=clang++"
+            "-DLLVM_ENABLE_ZLIB=FORCE_ON"
+            "-DCMAKE_OSX_ARCHITECTURES=x86_64;arm64"
+            "-DCMAKE_OSX_DEPLOYMENT_TARGET=10.13"
+            "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"
+            "-Dabsl_DIR=$HOME/grpc-installation/lib/cmake/absl"
+          grpc_version: v1.51.3
+          # BoringSSL doesn't support universal binaries when building with ASM.
+          grpc_cmake: >-
+            "-DOPENSSL_NO_ASM=ON"
+          exe: ""
+    steps:
+    - name: Clone build scripts
+      uses: actions/checkout@v4
+    # The MSVC environment is located through vswhere instead of hardcoding
+    # the install path, so the same step works for VS2022 on windows-2022 and
+    # for VS2026 on the arm64 image, in any edition.
+    - name: Set up MSVC environment
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: |
+        $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
+        if (-not (Test-Path $vswhere)) { throw "vswhere.exe not found: $vswhere" }
+        $component = "Microsoft.VisualStudio.Component.VC.Tools.${{ matrix.config.msvc_component }}"
+        $vsPath = & $vswhere -latest -products * -requires $component -property installationPath
+        if (-not $vsPath) { throw "No Visual Studio installation provides $component" }
+        $vcvars = Join-Path $vsPath 'VC\Auxiliary\Build\vcvarsall.bat'
+        Write-Host "Using $vcvars with architecture ${{ matrix.config.msvc_arch }}"
+        cmd /c "`"$vcvars`" ${{ matrix.config.msvc_arch }} >NUL && set" | ForEach-Object {
+          $name, $value = $_ -split '=', 2
+          if ($value) { "$name=$value" >> $env:GITHUB_ENV }
+        }
+    - name: Install tools
+      if: ${{ matrix.config.preinstall }}
+      run: ${{ matrix.config.preinstall }}
+    - name: Clone gRPC
+      uses: actions/checkout@v4
+      with:
+        repository: grpc/grpc
+        path: grpc
+        ref: ${{ matrix.config.grpc_version }}
+        submodules: recursive
+    - name: Build gRPC
+      run: >
+        mkdir $HOME/grpc-installation
+
+        mkdir grpc-build
+
+        cmake -G Ninja -S grpc -B grpc-build
+        "-DgRPC_INSTALL=ON"
+        "-DCMAKE_INSTALL_PREFIX=$HOME/grpc-installation"
+        "-DCMAKE_BUILD_TYPE=Release"
+        "-DCMAKE_C_FLAGS_RELEASE=${{ matrix.config.cflags }}"
+        "-DCMAKE_CXX_FLAGS_RELEASE=${{ matrix.config.cflags }}"
+        ${{ matrix.config.grpc_cmake }} ${{ matrix.config.cmake }}
+
+        ninja -C grpc-build install
+    - name: Clone LLVM
+      uses: actions/checkout@v4
+      with:
+        repository: ${{ needs.prepare.outputs.llvm_repo }}
+        path: llvm-project
+        ref: ${{ needs.prepare.outputs.llvm_commit }}
+    - name: Set build directory
+      shell: bash
+      run: echo "CLANGD_DIR=clangd_${{ needs.prepare.outputs.tag_name }}" >> "$GITHUB_ENV"
+    # NOTE: never put `#` comments inside a folded/literal `run:` block. YAML
+    # keeps them verbatim, the folded result becomes a single shell line, and
+    # the shell then treats everything after `#` as a comment -- silently
+    # dropping the remaining arguments. Keep comments out here.
+    #
+    # LIBOMP_OMPD_GDB_SUPPORT=OFF: the OMPD GDB plugin is a shared module that
+    # links LLVMSupport (and therefore the non-PIC system libz.a forced by
+    # linux-static-deps.cmake). We don't ship it.
+    - name: CMake
+      run: >
+        mkdir ${{ env.CLANGD_DIR }}
+
+        cp llvm-project/llvm/LICENSE.TXT ${{ env.CLANGD_DIR }}
+
+        cmake -G Ninja -S llvm-project/llvm -B ${{ env.CLANGD_DIR }}
+        "-DLLVM_ENABLE_PROJECTS=clang;clang-tools-extra"
+        "-DLLVM_ENABLE_RUNTIMES=compiler-rt;openmp"
+        "-DLLVM_ENABLE_ASSERTIONS=OFF"
+        "-DLLVM_ENABLE_BACKTRACES=ON"
+        "-DLLVM_ENABLE_TERMINFO=OFF"
+        "-DCMAKE_BUILD_TYPE=Release"
+        "-DCLANG_PLUGIN_SUPPORT=OFF"
+        "-DLLVM_ENABLE_PLUGINS=OFF"
+        "-DCMAKE_C_FLAGS_RELEASE=${{ matrix.config.cflags }}"
+        "-DCMAKE_CXX_FLAGS_RELEASE=${{ matrix.config.cflags }}"
+        "-DCLANGD_ENABLE_REMOTE=ON"
+        "-DLIBOMP_OMPD_GDB_SUPPORT=OFF"
+        "-DLLVM_ENABLE_ZSTD=OFF"
+        "-DGRPC_INSTALL_PATH=$HOME/grpc-installation"
+        ${{ matrix.config.cmake }}
+    - name: Ninja
+      run: >
+        ninja -C ${{ env.CLANGD_DIR }} clangd clangd-indexer clangd-index-server
+        clangd-index-server-monitor runtimes
+    # The glibc requirement is contractual for the linux x86_64 build, so fail
+    # the job instead of shipping a binary that needs a newer glibc. If this
+    # step ever fails, it prints the offending symbol@version pairs: either
+    # force an older version in .github/workflows/lib_compat.h or stop using
+    # the feature that pulls the new symbol in.
+    - name: Check glibc symbol versions (must be <= 2.17)
+      if: matrix.config.name == 'linux-x86_64'
+      shell: bash
+      run: >
+        python3 .github/workflows/lib_compat_test.py
+        --lib=${{ matrix.config.compat_lib }}
+        ${{ env.CLANGD_DIR }}/bin/clangd
+    - name: Archive clangd
+      run: >
+        7z a clangd-${{ matrix.config.name }}-${{ needs.prepare.outputs.tag_name }}.zip
+        ${{ env.CLANGD_DIR }}/LICENSE.TXT
+        ${{ env.CLANGD_DIR }}/bin/clangd${{ matrix.config.exe }}
+        ${{ env.CLANGD_DIR }}/lib/clang
+    - name: Archive indexing tools
+      run: >
+        7z a clangd_indexing_tools-${{ matrix.config.name }}-${{ needs.prepare.outputs.tag_name }}.zip
+        ${{ env.CLANGD_DIR }}/LICENSE.TXT
+        ${{ env.CLANGD_DIR }}/bin/clangd-indexer${{ matrix.config.exe }}
+        ${{ env.CLANGD_DIR }}/bin/clangd-index-server${{ matrix.config.exe }}
+        ${{ env.CLANGD_DIR }}/bin/clangd-index-server-monitor${{ matrix.config.exe }}
+        ${{ env.CLANGD_DIR }}/lib/clang
+    - name: Archive clangd PDB symbols
+      if: runner.os == 'Windows'
+      run: >
+        7z a clangd-debug-symbols-${{ matrix.config.name }}-${{ needs.prepare.outputs.tag_name }}.7z -t7z -m0=LZMA2
+        ${{ env.CLANGD_DIR }}/LICENSE.TXT
+        ${{ env.CLANGD_DIR }}/bin/clangd.pdb
+    - name: Upload clangd artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: clangd-${{ matrix.config.name }}
+        path: clangd-${{ matrix.config.name }}-${{ needs.prepare.outputs.tag_name }}.zip
+        if-no-files-found: error
+    - name: Upload indexing tools artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: clangd_indexing_tools-${{ matrix.config.name }}
+        path: clangd_indexing_tools-${{ matrix.config.name }}-${{ needs.prepare.outputs.tag_name }}.zip
+        if-no-files-found: error
+    - name: Upload clangd PDB artifact
+      if: runner.os == 'Windows'
+      uses: actions/upload-artifact@v4
+      with:
+        name: clangd-debug-symbols-${{ matrix.config.name }}
+        path: clangd-debug-symbols-${{ matrix.config.name }}-${{ needs.prepare.outputs.tag_name }}.7z
+        if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs: [prepare, build]
+    if: needs.prepare.outputs.release_tag != ''
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+    - name: Download artifacts
+      uses: actions/download-artifact@v4
+      with:
+        path: dist
+        merge-multiple: true
+    - name: Create or update release
+      shell: bash
+      env:
+        GH_TOKEN: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
+        TAG: ${{ needs.prepare.outputs.release_tag }}
+        RELEASE_NAME: ${{ needs.prepare.outputs.release_name }}
+        LLVM_REPO: ${{ needs.prepare.outputs.llvm_repo }}
+        LLVM_COMMIT: ${{ needs.prepare.outputs.llvm_commit }}
+      run: |
+        set -euo pipefail
+        ls -l dist
+        notes="Built from ${LLVM_REPO}@${LLVM_COMMIT}.
+
+        | target | notes |
+        | --- | --- |
+        | linux-x86_64 | requires glibc >= 2.17 |
+        | linux-aarch64 | built on Ubuntu 24.04 |
+        | windows-x86_64 | MSVC, static CRT |
+        | winarm64 | MSVC, static CRT, arm64 |
+        | macos | universal (x86_64 + arm64), macOS 15 SDK |"
+        if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+          gh release upload "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --clobber
+        else
+          gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" \
+            --title "$RELEASE_NAME" --notes "$notes" --prerelease
+        fi
