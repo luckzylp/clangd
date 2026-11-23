@@ -120,10 +120,11 @@ jobs:
             apt-get install -y ninja-build libz-dev libc-ares-dev wget clang-12
             software-properties-common p7zip-full curl binutils python3 &&
             add-apt-repository ppa:git-core/ppa &&
-            wget -O - https://apt.kitware.com/keys/kitware-archive-latest.asc 2>/dev/null | apt-key add - &&
-            apt-add-repository 'deb https://apt.kitware.com/ubuntu/ bionic main' &&
             apt-get update &&
-            apt-get install -y git cmake python3.8 python3.8-dev
+            apt-get install -y git python3.8 python3.8-dev
+          # focal ships CMake 3.16, the Kitware bionic repo tops out at 3.25.2
+          # and current LLVM wants >= 3.31, so install a pinned CMake instead.
+          cmake_url: https://github.com/Kitware/CMake/releases/download/v3.31.6/cmake-3.31.6-linux-x86_64.tar.gz
           cflags: -O3 -gline-tables-only -DNDEBUG -include $GITHUB_WORKSPACE/.github/workflows/lib_compat.h
           # clang-12 rather than clang-10: current LLVM no longer builds with
           # the focal default toolchain.
@@ -147,7 +148,9 @@ jobs:
           preinstall: >-
             sudo apt-get update &&
             sudo apt-get install -y ninja-build zlib1g-dev libstdc++-13-dev
-            p7zip-full cmake clang-18 python3 curl
+            p7zip-full clang-18 python3 curl
+          # Noble ships CMake 3.28, below the 3.31 LLVM now requires.
+          cmake_url: https://github.com/Kitware/CMake/releases/download/v3.31.6/cmake-3.31.6-linux-aarch64.tar.gz
           cflags: -O3 -gline-tables-only -DNDEBUG
           cmake: >-
             "-DCMAKE_C_COMPILER=clang-18"
@@ -205,6 +208,9 @@ jobs:
         - name: macos
           os: macos-15
           preinstall: brew install ninja zlib p7zip
+          # The image's CMake is 4.4.x, which rejects the cmake_minimum_required
+          # of the older gRPC release we build against. Pin 3.31 instead.
+          cmake_url: https://github.com/Kitware/CMake/releases/download/v3.31.6/cmake-3.31.6-macos-universal.tar.gz
           cflags: -O3 -gline-tables-only -DNDEBUG
           cmake: >-
             "-DCMAKE_C_COMPILER=clang"
@@ -243,6 +249,30 @@ jobs:
     - name: Install tools
       if: ${{ matrix.config.preinstall }}
       run: ${{ matrix.config.preinstall }}
+    # Current llvm-project requires CMake >= 3.31, and the images we build on
+    # ship either older ones (focal: 3.16 via apt, noble: 3.28) or a 4.x that
+    # is too new for the pinned gRPC release. Download one known version and
+    # put it in front of PATH. The macOS tarball nests the binaries in
+    # CMake.app/Contents/bin, hence the layout probe.
+    - name: Install pinned CMake
+      if: ${{ matrix.config.cmake_url }}
+      shell: bash
+      run: |
+        set -euo pipefail
+        dest="$HOME/.local/cmake"
+        mkdir -p "$dest"
+        curl -fsSL "${{ matrix.config.cmake_url }}" -o "$HOME/cmake.tar.gz"
+        tar -xzf "$HOME/cmake.tar.gz" -C "$dest" --strip-components=1
+        bindir="$dest/bin"
+        [ -x "$bindir/cmake" ] || bindir="$dest/CMake.app/Contents/bin"
+        [ -x "$bindir/cmake" ] || { echo "::error::cmake not found in the archive"; exit 1; }
+        "$bindir/cmake" --version
+        echo "$bindir" >>"$GITHUB_PATH"
+    - name: Show toolchain versions
+      shell: bash
+      run: |
+        cmake --version | head -1
+        ninja --version
     - name: Clone gRPC
       uses: actions/checkout@v4
       with:
