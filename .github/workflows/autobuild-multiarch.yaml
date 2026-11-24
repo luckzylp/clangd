@@ -231,8 +231,18 @@ jobs:
           # Build the C implementations instead, like the arm64 and macOS
           # targets already do. Only TLS throughput of the remote index client
           # is affected.
+          # gRPC_MSVC_STATIC_RUNTIME only rewrites /MD to /MT in the flag
+          # strings, which the subprojects override: abseil defaults
+          # ABSL_MSVC_STATIC_RUNTIME to OFF and sets CMAKE_MSVC_RUNTIME_LIBRARY
+          # for its own directory, and gRPC force-sets protobuf's
+          # protobuf_MSVC_STATIC_RUNTIME to OFF in the cache before adding it,
+          # so those objects come out as /MD and linking against our /MT clangd
+          # fails with LNK2019 on __imp_ symbols. Pin both from the command
+          # line, which wins over their CACHE defaults.
           grpc_cmake: >-
             "-DgRPC_MSVC_STATIC_RUNTIME=ON"
+            "-DABSL_MSVC_STATIC_RUNTIME=ON"
+            "-Dprotobuf_MSVC_STATIC_RUNTIME=ON"
             "-DOPENSSL_NO_ASM=ON"
           exe: ".exe"
         - name: winarm64
@@ -261,6 +271,8 @@ jobs:
           # BoringSSL has no arm64 Windows assembler path under MSVC.
           grpc_cmake: >-
             "-DgRPC_MSVC_STATIC_RUNTIME=ON"
+            "-DABSL_MSVC_STATIC_RUNTIME=ON"
+            "-Dprotobuf_MSVC_STATIC_RUNTIME=ON"
             "-DOPENSSL_NO_ASM=ON"
           exe: ".exe"
         # macOS is built twice, natively, and the two slices are lipo'd
