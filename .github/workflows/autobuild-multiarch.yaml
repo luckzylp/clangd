@@ -11,6 +11,10 @@
 #                       forcing the static libz.a
 #                     - lib_compat_test.py --lib=GLIBC_2.18, the same
 #                       whitelist the original workflow enforces
+#                     - getentropy_compat.c defines getentropy() locally:
+#                       abseil >= 20240722 calls that glibc 2.25 symbol when
+#                       built against 2.25+ headers (focal is 2.31) and it has
+#                       no older version to pin
 #                   GLIBC_2.18 only added __cxa_thread_atexit_impl, which is a
 #                   weak reference, so the resulting binary still runs on
 #                   systems with glibc 2.17.
@@ -169,7 +173,7 @@ jobs:
           cmake: >-
             "-DCMAKE_C_COMPILER=clang-12"
             "-DCMAKE_CXX_COMPILER=clang++-12"
-            "-DCMAKE_EXE_LINKER_FLAGS_RELEASE=-static-libgcc -Wl,--compress-debug-sections=zlib"
+            "-DCMAKE_EXE_LINKER_FLAGS_RELEASE=-static-libgcc -Wl,--compress-debug-sections=zlib $GITHUB_WORKSPACE/getentropy_compat.o"
             "-DLLVM_STATIC_LINK_CXX_STDLIB=ON"
             "-DLLVM_ENABLE_ZLIB=FORCE_ON"
             "-DCMAKE_PROJECT_INCLUDE=$GITHUB_WORKSPACE/.github/workflows/linux-static-deps.cmake"
@@ -359,6 +363,22 @@ jobs:
       run: |
         cmake --version | head -1
         ninja --version
+    # abseil 20240722 (the version every target shares through gRPC 1.69)
+    # calls getentropy() when it is compiled against glibc >= 2.25, and the
+    # focal container's headers are 2.31. That would make clangd import
+    # getentropy@GLIBC_2.25, which the compatibility gate rejects. Unlike the
+    # libm symbols in lib_compat.h there is no older version of getentropy to
+    # force, so link a local definition instead; see getentropy_compat.c.
+    - name: Build old-glibc compat stubs
+      if: matrix.config.name == 'linux-x86_64'
+      shell: bash
+      run: |
+        set -euo pipefail
+        clang-12 -O2 -Wall -Wextra -c \
+          "$GITHUB_WORKSPACE/.github/workflows/getentropy_compat.c" \
+          -o "$GITHUB_WORKSPACE/getentropy_compat.o"
+        echo "undefined symbols in the stub (all must predate glibc 2.18):"
+        nm -u "$GITHUB_WORKSPACE/getentropy_compat.o"
     - name: Clone gRPC
       uses: actions/checkout@v5
       with:
