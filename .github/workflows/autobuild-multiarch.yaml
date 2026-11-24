@@ -66,11 +66,23 @@ on:
         required: false
         default: ''
 
-# One gRPC release for every target.
-# See the comment above the "Ninja" step for why
-# clangd-index-server-monitor is no longer built.
+# One gRPC release for every target. Must stay >= v1.68: earlier releases
+# bundle an abseil whose macOS randen flags are emitted as two list items
+# ("-Xarch_x86_64" "-maes" "-msse4.1"), which collapses into
+# "-Xarch_x86_64 -maes -msse4.1" on the command line, so -msse4.1 reaches the
+# arm64 compile and clang rejects it. abseil fixed that with
+# "SHELL:-Xarch_<arch> <flag>" in 20240722, first shipped by gRPC 1.68.0.
+#
+# v1.69.0 is the last gRPC that builds as C++14, which keeps the Ubuntu 20.04
+# container (clang-12 + libstdc++ 9) on the least demanding configuration. Note
+# that gRPC has no LTS releases (their FAQ says so); 1.69 is the one release
+# that ever got a written one-year bug/security commitment (proposal L120),
+# because it was the final C++14 line.
+#
+# See the comment above the "Ninja" step for why clangd-index-server-monitor
+# is no longer built.
 env:
-  GRPC_VERSION: v1.62.2
+  GRPC_VERSION: v1.69.0
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
