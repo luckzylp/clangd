@@ -253,11 +253,13 @@ jobs:
           msvc_arch: arm64
           msvc_component: ARM64
           cflags: /O2 /DNDEBUG
-          # CMAKE_DISABLE_PRECOMPILE_HEADERS: the native arm64 MSVC (14.52)
-          # crashes with C1001 (internal compiler error, stack frame
-          # UtcBldCompileSerializedFile) while compiling
-          # mlir-tblgen/OpDefinitionsGen.cpp against the LLVMSupport PCH.
-          # Building without PCH avoids the ICE; it costs build time only.
+          # CMAKE_DISABLE_PRECOMPILE_HEADERS: the arm64 MSVC here (14.52) is
+          # the toolchain that C1001s on this codebase, and PCH is a known
+          # trigger for that class of ICE. It is not the root cause of the
+          # mlir-tblgen crash (that one reproduces with PCH off too, which is
+          # why CLANG_ENABLE_CIR is turned off for every target), but this job
+          # is the only place the arm64 compiler is exercised, so it stays off
+          # rather than mixing two variables at once. Costs build time only.
           cmake: >-
             "-DCMAKE_C_COMPILER=cl"
             "-DCMAKE_CXX_COMPILER=cl"
@@ -427,6 +429,22 @@ jobs:
     # LIBOMP_OMPD_GDB_SUPPORT=OFF: the OMPD GDB plugin is a shared module that
     # links LLVMSupport (and therefore the non-PIC system libz.a forced by
     # linux-static-deps.cmake). We don't ship it.
+    #
+    # CLANG_ENABLE_CIR defaults to ON in llvm/CMakeLists.txt, and when clang is
+    # in LLVM_ENABLE_PROJECTS it silently appends mlir as a dependency-only
+    # project:
+    #
+    #   option(CLANG_ENABLE_CIR "Build ClangIR support into the compiler" ON)
+    #   if (CLANG_ENABLE_CIR AND "clang" IN_LIST LLVM_ENABLE_PROJECTS ...)
+    #     list(APPEND LLVM_ENABLE_PROJECTS "mlir")
+    #
+    # That is why a build asking only for clang;clang-tools-extra still
+    # compiles tools/mlir/mlir-tblgen. Nothing we ship uses ClangIR, and on
+    # Windows arm64 those extra translations units are what crash: MSVC 14.52
+    # dies with C1001 (UtcBldCompileSerializedFile, i.e. the known bit-field
+    # ICE that Microsoft only fixed in 19.51) on
+    # mlir/tools/mlir-tblgen/OpDefinitionsGen.cpp. Turning CIR off keeps MLIR
+    # out of the build entirely.
     - name: CMake
       run: >
         mkdir ${{ env.CLANGD_DIR }}
@@ -435,6 +453,7 @@ jobs:
 
         cmake -G Ninja -S llvm-project/llvm -B ${{ env.CLANGD_DIR }}
         "-DLLVM_ENABLE_PROJECTS=clang;clang-tools-extra"
+        "-DCLANG_ENABLE_CIR=OFF"
         "-DLLVM_ENABLE_RUNTIMES=compiler-rt;openmp"
         "-DLLVM_ENABLE_ASSERTIONS=OFF"
         "-DLLVM_ENABLE_BACKTRACES=ON"
