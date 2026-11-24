@@ -323,7 +323,10 @@ jobs:
       shell: bash
       run: |
         set +e
-        [ -f grpc-build/build.ninja ] || exit 0
+        if [ ! -f grpc-build/build.ninja ]; then
+          echo "::error::gRPC configure failed (no grpc-build/build.ninja was produced)"
+          exit 0
+        fi
         ninja -C grpc-build install 2>&1 |
           grep -a -E "error:|FAILED:|fatal error|CMake Error" |
           head -5 | tr -d '\r' |
@@ -381,7 +384,10 @@ jobs:
       shell: bash
       run: |
         set +e
-        [ -f "$CLANGD_DIR/build.ninja" ] || exit 0
+        if [ ! -f "$CLANGD_DIR/build.ninja" ]; then
+          echo "::error::LLVM configure failed (no build.ninja in ${CLANGD_DIR})"
+          exit 0
+        fi
         ninja -C "$CLANGD_DIR" clangd clangd-indexer clangd-index-server \
           clangd-index-server-monitor runtimes 2>&1 |
           grep -a -E "error:|FAILED:|fatal error|undefined reference" |
