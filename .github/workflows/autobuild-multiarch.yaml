@@ -16,7 +16,8 @@
 #                   systems with glibc 2.17.
 #   linux-aarch64   built natively on an Ubuntu 24.04 arm64 runner.
 #   windows-x86_64  built natively with MSVC on windows-2022.
-#   winarm64        built natively with MSVC on a Windows 11 arm64 runner.
+#   (winarm64 is disabled: the arm64 MSVC shipped by the VS2026 image hits
+#    compiler defect C1001 on this tree. See the note in the matrix.)
 #   macos-x86_64    native x86_64 build on macos-15-intel (deployment 10.13)
 #   macos-arm64     native arm64 build on macos-15 (deployment 11.0)
 #                   The two slices are combined into one universal bundle by
@@ -34,8 +35,9 @@
 #
 # Asset naming note: assets that would collide with the winget publishing
 # workflow (which looks for `clangd-windows-*.zip`) are kept unique. Only the
-# x86_64 Windows archive starts with `clangd-windows-`; the arm64 one is
-# published as `clangd-winarm64-*` so winget keeps picking the x64 build.
+# x86_64 Windows archive starts with `clangd-windows-`. If the arm64 Windows
+# target ever comes back, publish it as `clangd-winarm64-*` so winget keeps
+# picking the x64 build.
 #
 # Every target builds the same gRPC release (env.GRPC_VERSION) so there is one
 # dependency stack to reason about. The price is that clangd-index-server-monitor
@@ -245,38 +247,25 @@ jobs:
             "-Dprotobuf_MSVC_STATIC_RUNTIME=ON"
             "-DOPENSSL_NO_ASM=ON"
           exe: ".exe"
-        - name: winarm64
-          # Pinned to the VS2026 image explicitly: the plain `windows-11-arm`
-          # label had no Visual Studio at all before it was re-pointed at this
-          # image, so use the explicit label to stay deterministic.
-          os: windows-11-vs2026-arm
-          msvc_arch: arm64
-          msvc_component: ARM64
-          cflags: /O2 /DNDEBUG
-          # CMAKE_DISABLE_PRECOMPILE_HEADERS: the arm64 MSVC here (14.52) is
-          # the toolchain that C1001s on this codebase, and PCH is a known
-          # trigger for that class of ICE. It is not the root cause of the
-          # mlir-tblgen crash (that one reproduces with PCH off too, which is
-          # why CLANG_ENABLE_CIR is turned off for every target), but this job
-          # is the only place the arm64 compiler is exercised, so it stays off
-          # rather than mixing two variables at once. Costs build time only.
-          cmake: >-
-            "-DCMAKE_C_COMPILER=cl"
-            "-DCMAKE_CXX_COMPILER=cl"
-            "-DLLVM_ENABLE_ZLIB=OFF"
-            "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded"
-            "-DLLVM_ENABLE_PDB=ON"
-            "-DLLVM_PARALLEL_LINK_JOBS=1"
-            "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"
-            "-DCMAKE_PREFIX_PATH=$HOME/grpc-installation"
-            "-DCMAKE_DISABLE_PRECOMPILE_HEADERS=ON"
-          # BoringSSL has no arm64 Windows assembler path under MSVC.
-          grpc_cmake: >-
-            "-DgRPC_MSVC_STATIC_RUNTIME=ON"
-            "-DABSL_MSVC_STATIC_RUNTIME=ON"
-            "-Dprotobuf_MSVC_STATIC_RUNTIME=ON"
-            "-DOPENSSL_NO_ASM=ON"
-          exe: ".exe"
+        # winarm64 is intentionally absent. The arm64 MSVC in the VS2026 image
+        # (14.52) hits a known compiler defect -- "fatal error C1001 ... cl!Utc
+        # BldCompileSerializedFile" -- on LLVM translation units, and Microsoft
+        # only fixed it in 19.51, which is still preview. Dropping MLIR through
+        # CLANG_ENABLE_CIR=OFF removed the first victim, but the toolchain stays
+        # unreliable for this tree, so the target is out until the image ships a
+        # fixed compiler. To restore it, add a matrix entry with:
+        #   os: windows-11-vs2026-arm
+        #   msvc_arch: arm64
+        #   msvc_component: ARM64
+        #   cflags: /O2 /DNDEBUG
+        #   cmake: the windows-x86_64 list (cl, static CRT, LLVM_ENABLE_PDB=ON,
+        #          CMAKE_PREFIX_PATH to the gRPC prefix) plus
+        #          CMAKE_DISABLE_PRECOMPILE_HEADERS=ON
+        #   grpc_cmake: the windows-x86_64 list (gRPC/ABSL/protobuf static
+        #          runtime + OPENSSL_NO_ASM, there is no arm64 assembler path)
+        #   exe: ".exe"
+        # and name its archives clangd-winarm64-* so the winget workflow keeps
+        # matching only clangd-windows-*.zip (see the note at the top).
         # macOS is built twice, natively, and the two slices are lipo'd
         # together by the macos-universal job below. A single universal build
         # on one host is not workable here: BoringSSL has arch-specific source
@@ -637,7 +626,6 @@ jobs:
         | linux-x86_64 | built with lib_compat.h, runs on glibc 2.17+ |
         | linux-aarch64 | built on Ubuntu 24.04 |
         | windows-x86_64 | MSVC, static CRT |
-        | winarm64 | MSVC, static CRT, arm64 |
         | macos | universal (x86_64 + arm64), macOS 15 SDK |"
         if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
           gh release upload "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --clobber
