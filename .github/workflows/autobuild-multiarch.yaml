@@ -22,14 +22,11 @@
 #   windows-x86_64  built natively with MSVC on windows-2022.
 #   (winarm64 is disabled: the arm64 MSVC shipped by the VS2026 image hits
 #    compiler defect C1001 on this tree. See the note in the matrix.)
-#   macos-x86_64    native x86_64 build on macos-15-intel (deployment 10.13)
-#   macos-arm64     native arm64 build on macos-15 (deployment 11.0)
-#                   The two slices are combined into one universal bundle by
-#                   the macos-universal job. Building universal in a single
-#                   job does not work: BoringSSL has per-architecture sources
-#                   and ends up with fat archives that contain objects for the
-#                   wrong architecture, and Homebrew >= formulae only ship the
-#                   native slice.
+#   macos           native arm64 build on macos-15 (deployment 11.0). No
+#                   x86_64 slice: macos-15-intel cannot finish this tree
+#                   inside GitHub's six hour job limit, and a universal
+#                   build on one host leaves BoringSSL with fat archives
+#                   containing objects for the wrong architecture.
 #
 # Builds are published as workflow artifacts. When `release_tag` is given, a
 # single short job at the end attaches them to a GitHub release. Doing the
@@ -270,37 +267,18 @@ jobs:
         #   exe: ".exe"
         # and name its archives clangd-winarm64-* so the winget workflow keeps
         # matching only clangd-windows-*.zip (see the note at the top).
-        # macOS is built twice, natively, and the two slices are lipo'd
-        # together by the macos-universal job below. A single universal build
-        # on one host is not workable here: BoringSSL has arch-specific source
-        # files and ends up producing fat archives with objects for the wrong
-        # architecture ("libcrypto.a(cpu_aarch64_linux.c.o) has no symbols"),
-        # and a Homebrew dependency is only ever built for the native slice.
-        - name: macos-x86_64
-          os: macos-15-intel
+        # macOS is built natively for arm64 only. The x86_64 slice used to be
+        # built on macos-15-intel, but that runner cannot finish this tree
+        # inside GitHub's six hour job limit: gRPC alone takes about 47 minutes
+        # there, and Ninja was still running when the job was killed at 6h00m.
+        # A universal build on one host is not an option either: BoringSSL has
+        # arch-specific sources and ends up with fat archives containing
+        # objects for the wrong slice. Hence arm64 native, with no lipo step.
+        - name: macos
+          os: macos-15
           preinstall: brew install ninja zlib p7zip
           # The image's CMake is 4.x, which rejects the cmake_minimum_required
           # of older gRPC releases. Pin 3.31 instead.
-          cmake_url: https://github.com/Kitware/CMake/releases/download/v3.31.6/cmake-3.31.6-macos-universal.tar.gz
-          cflags: -O3 -gline-tables-only -DNDEBUG
-          cmake: >-
-            "-DCMAKE_C_COMPILER=clang"
-            "-DCMAKE_CXX_COMPILER=clang++"
-            "-DLLVM_ENABLE_ZLIB=FORCE_ON"
-            "-DCMAKE_OSX_ARCHITECTURES=x86_64"
-            "-DCMAKE_OSX_DEPLOYMENT_TARGET=10.13"
-            "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"
-            "-DCMAKE_PREFIX_PATH=$HOME/grpc-installation"
-          # macOS ships zlib in the SDK, and gRPC's bundled copy does not
-          # compile against the macOS 15 SDK (zutil.c blows up inside
-          # _stdio.h). Use the system one instead of building zlib.
-          grpc_cmake: >-
-            "-DOPENSSL_NO_ASM=ON"
-            "-DgRPC_ZLIB_PROVIDER=package"
-          exe: ""
-        - name: macos-arm64
-          os: macos-15
-          preinstall: brew install ninja zlib p7zip
           cmake_url: https://github.com/Kitware/CMake/releases/download/v3.31.6/cmake-3.31.6-macos-universal.tar.gz
           cflags: -O3 -gline-tables-only -DNDEBUG
           cmake: >-
@@ -311,9 +289,18 @@ jobs:
             "-DCMAKE_OSX_DEPLOYMENT_TARGET=11.0"
             "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"
             "-DCMAKE_PREFIX_PATH=$HOME/grpc-installation"
+          # macOS ships zlib in the SDK, and gRPC's bundled copy does not
+          # compile against the macOS 15 SDK (zutil.c blows up inside
+          # _stdio.h). Use the system one instead of building zlib.
           grpc_cmake: >-
             "-DOPENSSL_NO_ASM=ON"
             "-DgRPC_ZLIB_PROVIDER=package"
+          # compiler-rt on Darwin builds variants for macOS, iOS, tvOS and
+          # watchOS, none of which clangd uses - it only needs the builtin
+          # headers under lib/clang/<ver>/include - and they cost time this job
+          # does not have. Request the resource headers explicitly instead, so
+          # lib/clang still exists for the archive step.
+          targets: clangd clangd-indexer clangd-index-server clang-resource-headers
           exe: ""
     steps:
     - name: Clone build scripts
@@ -488,8 +475,8 @@ jobs:
     # carrying a patch against LLVM's source.
     - name: Ninja
       run: >
-        ninja -C ${{ env.CLANGD_DIR }} clangd clangd-indexer clangd-index-server
-        runtimes
+        ninja -C ${{ env.CLANGD_DIR }} ${{ matrix.config.targets ||
+        'clangd clangd-indexer clangd-index-server runtimes' }}
     # See "Report gRPC build errors" above: same trick for the LLVM/clangd
     # build, replaying the same target list so the failing translation unit is
     # rebuilt and its diagnostics get republished as annotations. No -k, so the
@@ -503,8 +490,7 @@ jobs:
           echo "::warning::no LLVM build.ninja (CLANGD_DIR=${CLANGD_DIR:-unset}) - configure did not complete"
           exit 0
         fi
-        ninja -C "$CLANGD_DIR" clangd clangd-indexer clangd-index-server \
-          runtimes 2>&1 |
+        ninja -C "$CLANGD_DIR" ${{ matrix.config.targets || 'clangd clangd-indexer clangd-index-server runtimes' }} 2>&1 |
           grep -a -E "error:|FAILED:|fatal error|undefined reference" |
           head -5 | tr -d '\r' |
           while IFS= read -r line; do echo "::error::$(printf '%s' "$line" | sed 's/%/%25/g')"; done
@@ -560,64 +546,9 @@ jobs:
         path: clangd-debug-symbols-${{ matrix.config.name }}-${{ needs.prepare.outputs.tag_name }}.7z
         if-no-files-found: error
 
-  # Merge the two native macOS builds into one universal bundle. lipo has to
-  # run on macOS, and the arm64 slice's lib/clang headers are identical to the
-  # x86_64 ones, so start from that tree and only lipo the executables.
-  macos-universal:
-    name: macos (universal)
-    needs: [prepare, build]
-    if: always() && needs.build.result == 'success'
-    runs-on: macos-15
-    steps:
-    - name: Fetch the two macOS slices
-      uses: actions/download-artifact@v8
-      with:
-        pattern: clangd-macos-*
-        path: slices
-    - name: Lipo the slices together
-      shell: bash
-      run: |
-        set -euo pipefail
-        tag='${{ needs.prepare.outputs.tag_name }}'
-        dir="clangd_${tag}"
-        bins="clangd clangd-indexer clangd-index-server"
-        for arch in x86_64 arm64; do
-          zip="slices/clangd-macos-${arch}/clangd-macos-${arch}-${tag}.zip"
-          mkdir -p "in-${arch}"
-          unzip -q -o "$zip" -d "in-${arch}"
-          test -f "in-${arch}/${dir}/bin/clangd"
-        done
-        rm -rf out && cp -R "in-arm64/${dir}" out
-        for b in $bins; do
-          lipo -create "in-x86_64/${dir}/bin/${b}" "in-arm64/${dir}/bin/${b}" -output "out/bin/${b}"
-        done
-        archs=$(lipo -archs out/bin/clangd)
-        echo "clangd slices: ${archs}"
-        case "$archs" in
-          *x86_64*arm64*|*arm64*x86_64*) ;;
-          *) echo "::error::universal binary is missing a slice: ${archs}"; exit 1 ;;
-        esac
-        cd out
-        zip -q -r "../clangd-macos-${tag}.zip" "${dir}/LICENSE.TXT" "${dir}/bin/clangd" "${dir}/lib/clang"
-        zip -q -r "../clangd_indexing_tools-macos-${tag}.zip" "${dir}/LICENSE.TXT" \
-          "${dir}/bin/clangd-indexer" "${dir}/bin/clangd-index-server" "${dir}/lib/clang"
-        unzip -l "../clangd-macos-${tag}.zip" | tail -3
-    - name: Upload clangd artifact
-      uses: actions/upload-artifact@v7
-      with:
-        name: clangd-macos
-        path: clangd-macos-${{ needs.prepare.outputs.tag_name }}.zip
-        if-no-files-found: error
-    - name: Upload indexing tools artifact
-      uses: actions/upload-artifact@v7
-      with:
-        name: clangd_indexing_tools-macos
-        path: clangd_indexing_tools-macos-${{ needs.prepare.outputs.tag_name }}.zip
-        if-no-files-found: error
-
   release:
     name: Publish release
-    needs: [prepare, build, macos-universal]
+    needs: [prepare, build]
     if: always() && needs.prepare.outputs.release_tag != '' && needs.build.result == 'success'
     runs-on: ubuntu-latest
     permissions:
@@ -646,7 +577,7 @@ jobs:
         | linux-x86_64 | built with lib_compat.h, runs on glibc 2.17+ |
         | linux-aarch64 | built on Ubuntu 24.04 |
         | windows-x86_64 | MSVC, static CRT |
-        | macos | universal (x86_64 + arm64), macOS 15 SDK |"
+        | macos | arm64, macOS 15 SDK, deployment target 11.0 |"
         if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
           gh release upload "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --clobber
         else
