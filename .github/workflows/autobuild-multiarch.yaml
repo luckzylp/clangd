@@ -246,7 +246,7 @@ jobs:
           exe: ""
     steps:
     - name: Clone build scripts
-      uses: actions/checkout@v4
+      uses: actions/checkout@v5
     # The MSVC environment is located through vswhere instead of hardcoding
     # the install path, so the same step works for VS2022 on windows-2022 and
     # for VS2026 on the arm64 image, in any edition.
@@ -293,7 +293,7 @@ jobs:
         cmake --version | head -1
         ninja --version
     - name: Clone gRPC
-      uses: actions/checkout@v4
+      uses: actions/checkout@v5
       with:
         repository: grpc/grpc
         path: grpc
@@ -314,8 +314,23 @@ jobs:
         ${{ matrix.config.grpc_cmake }} ${{ matrix.config.cmake }}
 
         ninja -C grpc-build install
+    # GitHub job logs need authentication to download, so a failed run is
+    # otherwise a black box. Replay the failing build (ninja resumes where it
+    # stopped) and republish the first errors as workflow annotations, which
+    # are readable anonymously.
+    - name: Report gRPC build errors
+      if: failure()
+      shell: bash
+      run: |
+        set +e
+        [ -f grpc-build/build.ninja ] || exit 0
+        ninja -C grpc-build install 2>&1 |
+          grep -a -E "error:|FAILED:|fatal error|CMake Error" |
+          head -5 | tr -d '\r' |
+          while IFS= read -r line; do echo "::error::$(printf '%s' "$line" | sed 's/%/%25/g')"; done
+        exit 0
     - name: Clone LLVM
-      uses: actions/checkout@v4
+      uses: actions/checkout@v5
       with:
         repository: ${{ needs.prepare.outputs.llvm_repo }}
         path: llvm-project
@@ -357,6 +372,22 @@ jobs:
       run: >
         ninja -C ${{ env.CLANGD_DIR }} clangd clangd-indexer clangd-index-server
         clangd-index-server-monitor runtimes
+    # See "Report gRPC build errors" above: same trick for the LLVM/clangd
+    # build, replaying the same target list so the failing translation unit is
+    # rebuilt and its diagnostics get republished as annotations. No -k, so the
+    # replay stops at the first error again instead of building everything else.
+    - name: Report compile errors
+      if: failure()
+      shell: bash
+      run: |
+        set +e
+        [ -f "$CLANGD_DIR/build.ninja" ] || exit 0
+        ninja -C "$CLANGD_DIR" clangd clangd-indexer clangd-index-server \
+          clangd-index-server-monitor runtimes 2>&1 |
+          grep -a -E "error:|FAILED:|fatal error|undefined reference" |
+          head -5 | tr -d '\r' |
+          while IFS= read -r line; do echo "::error::$(printf '%s' "$line" | sed 's/%/%25/g')"; done
+        exit 0
     # Same check as the original workflow's "Check binary compatibility" step,
     # run before archiving so a bad binary never even becomes an artifact. If
     # it fails it prints the offending symbol@version pairs: force an older
@@ -390,20 +421,20 @@ jobs:
         ${{ env.CLANGD_DIR }}/LICENSE.TXT
         ${{ env.CLANGD_DIR }}/bin/clangd.pdb
     - name: Upload clangd artifact
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: clangd-${{ matrix.config.name }}
         path: clangd-${{ matrix.config.name }}-${{ needs.prepare.outputs.tag_name }}.zip
         if-no-files-found: error
     - name: Upload indexing tools artifact
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: clangd_indexing_tools-${{ matrix.config.name }}
         path: clangd_indexing_tools-${{ matrix.config.name }}-${{ needs.prepare.outputs.tag_name }}.zip
         if-no-files-found: error
     - name: Upload clangd PDB artifact
       if: runner.os == 'Windows'
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v7
       with:
         name: clangd-debug-symbols-${{ matrix.config.name }}
         path: clangd-debug-symbols-${{ matrix.config.name }}-${{ needs.prepare.outputs.tag_name }}.7z
@@ -418,7 +449,7 @@ jobs:
       contents: write
     steps:
     - name: Download artifacts
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v8
       with:
         path: dist
         merge-multiple: true
