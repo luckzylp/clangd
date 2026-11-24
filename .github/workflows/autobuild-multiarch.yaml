@@ -36,6 +36,11 @@
 # workflow (which looks for `clangd-windows-*.zip`) are kept unique. Only the
 # x86_64 Windows archive starts with `clangd-windows-`; the arm64 one is
 # published as `clangd-winarm64-*` so winget keeps picking the x64 build.
+#
+# Every target builds the same gRPC release (env.GRPC_VERSION) so there is one
+# dependency stack to reason about. The price is that clangd-index-server-monitor
+# is not built: it does not compile against any protobuf new enough for the
+# arm64 toolchains (details above the "Ninja" step).
 name: Build multi-arch release binaries
 
 on:
@@ -60,6 +65,12 @@ on:
         description: 'Release title (default: "<date> @<short commit>")'
         required: false
         default: ''
+
+# One gRPC release for every target.
+# See the comment above the "Ninja" step for why
+# clangd-index-server-monitor is no longer built.
+env:
+  GRPC_VERSION: v1.62.2
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -148,11 +159,9 @@ jobs:
             "-DLLVM_STATIC_LINK_CXX_STDLIB=ON"
             "-DLLVM_ENABLE_ZLIB=FORCE_ON"
             "-DCMAKE_PROJECT_INCLUDE=$GITHUB_WORKSPACE/.github/workflows/linux-static-deps.cmake"
-          grpc_version: v1.36.3
-          # Using c-ares as a module prevents dynamic linking of unneeded
-          # libraries. All other gRPC dependencies can be built from sources.
+            "-DCMAKE_PREFIX_PATH=$HOME/grpc-installation"
           grpc_cmake: >-
-            "-DgRPC_CARES_PROVIDER=package"
+            "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"
           # Same whitelist as autobuild.yaml. GLIBC_2.18's only addition is
           # __cxa_thread_atexit_impl, referenced weakly, so this still yields a
           # binary usable on glibc 2.17 systems.
@@ -180,9 +189,9 @@ jobs:
             "-DLLVM_ENABLE_ZLIB=FORCE_ON"
             "-DCMAKE_PROJECT_INCLUDE=$GITHUB_WORKSPACE/.github/workflows/linux-static-deps.cmake"
             "-DCMAKE_PREFIX_PATH=$HOME/grpc-installation"
-          # Newer gRPC: the pinned v1.36.3 predates arm64 support and its
-          # bundled abseil does not compile with GCC 13 / libstdc++ 13.
-          grpc_version: v1.62.2
+          # Same gRPC release as every other target (env.GRPC_VERSION); the
+          # natively built c-ares/re2/zlib it installs are picked up through
+          # CMAKE_PREFIX_PATH above.
           grpc_cmake: >-
             "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"
           exe: ""
@@ -199,7 +208,8 @@ jobs:
             "-DCMAKE_MSVC_RUNTIME_LIBRARY=MultiThreaded"
             "-DLLVM_ENABLE_PDB=ON"
             "-DLLVM_PARALLEL_LINK_JOBS=1"
-          grpc_version: v1.36.3
+            "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"
+            "-DCMAKE_PREFIX_PATH=$HOME/grpc-installation"
           grpc_cmake: >-
             "-DgRPC_MSVC_STATIC_RUNTIME=ON"
           exe: ".exe"
@@ -226,7 +236,6 @@ jobs:
             "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"
             "-DCMAKE_PREFIX_PATH=$HOME/grpc-installation"
             "-DCMAKE_DISABLE_PRECOMPILE_HEADERS=ON"
-          grpc_version: v1.62.2
           # BoringSSL has no arm64 Windows assembler path under MSVC.
           grpc_cmake: >-
             "-DgRPC_MSVC_STATIC_RUNTIME=ON"
@@ -253,7 +262,6 @@ jobs:
             "-DCMAKE_OSX_DEPLOYMENT_TARGET=10.13"
             "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"
             "-DCMAKE_PREFIX_PATH=$HOME/grpc-installation"
-          grpc_version: v1.62.2
           grpc_cmake: >-
             "-DOPENSSL_NO_ASM=ON"
           exe: ""
@@ -270,7 +278,6 @@ jobs:
             "-DCMAKE_OSX_DEPLOYMENT_TARGET=11.0"
             "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"
             "-DCMAKE_PREFIX_PATH=$HOME/grpc-installation"
-          grpc_version: v1.62.2
           grpc_cmake: >-
             "-DOPENSSL_NO_ASM=ON"
           exe: ""
@@ -327,7 +334,7 @@ jobs:
       with:
         repository: grpc/grpc
         path: grpc
-        ref: ${{ matrix.config.grpc_version }}
+        ref: ${{ env.GRPC_VERSION }}
         submodules: recursive
     - name: Build gRPC
       run: >
@@ -371,26 +378,6 @@ jobs:
     - name: Set build directory
       shell: bash
       run: echo "CLANGD_DIR=clangd_${{ needs.prepare.outputs.tag_name }}" >> "$GITHUB_ENV"
-    # clangd's remote-index monitor calls Status::message().as_string().
-    # as_string() only exists when absl::string_view is Abseil's own type: from
-    # abseil 20230125 on, options.h hard-codes ABSL_OPTION_USE_STD_STRING_VIEW 2
-    # so in C++17 it becomes an alias for std::string_view, and the call fails
-    # with "no member named 'as_string' in 'std::basic_string_view<char>'".
-    # Upstream never sees this because autobuild.yaml pins gRPC 1.36.3; on
-    # arm64 and macOS we need a newer gRPC, so make this one call work with
-    # either type. It is a no-op for old protobuf and stays correct if the
-    # pattern disappears (an upstream fix), hence no hard failure.
-    - name: Patch clangd remote monitor for newer protobuf
-      shell: bash
-      run: |
-        f=llvm-project/clang-tools-extra/clangd/index/remote/monitor/Monitor.cpp
-        if ! grep -q 'JsonStatus\.message()\.as_string()' "$f"; then
-          echo "pattern not present, nothing to patch"
-          exit 0
-        fi
-        sed -i.bak 's/JsonStatus\.message()\.as_string()/std::string(JsonStatus.message())/' "$f"
-        rm -f "$f.bak"
-        grep -n 'std::string(JsonStatus.message())' "$f"
     # NOTE: never put `#` comments inside a folded/literal `run:` block. YAML
     # keeps them verbatim, the folded result becomes a single shell line, and
     # the shell then treats everything after `#` as a comment -- silently
@@ -421,10 +408,19 @@ jobs:
         "-DLLVM_ENABLE_ZSTD=OFF"
         "-DGRPC_INSTALL_PATH=$HOME/grpc-installation"
         ${{ matrix.config.cmake }}
+    # clangd-index-server-monitor is deliberately not built: it calls
+    # Status::message().as_string(), which only compiles against protobuf whose
+    # Status returns Abseil's own string_view. Every gRPC release newer than
+    # 1.36.x bundles an abseil that aliases absl::string_view to
+    # std::string_view in C++17 (options.h hard-codes
+    # ABSL_OPTION_USE_STD_STRING_VIEW 2 since 20220623), and 1.36.x cannot be
+    # built for arm64 or on current toolchains. Building one current gRPC for
+    # all targets is worth more than this one monitoring CLI, and it avoids
+    # carrying a patch against LLVM's source.
     - name: Ninja
       run: >
         ninja -C ${{ env.CLANGD_DIR }} clangd clangd-indexer clangd-index-server
-        clangd-index-server-monitor runtimes
+        runtimes
     # See "Report gRPC build errors" above: same trick for the LLVM/clangd
     # build, replaying the same target list so the failing translation unit is
     # rebuilt and its diagnostics get republished as annotations. No -k, so the
@@ -439,7 +435,7 @@ jobs:
           exit 0
         fi
         ninja -C "$CLANGD_DIR" clangd clangd-indexer clangd-index-server \
-          clangd-index-server-monitor runtimes 2>&1 |
+          runtimes 2>&1 |
           grep -a -E "error:|FAILED:|fatal error|undefined reference" |
           head -5 | tr -d '\r' |
           while IFS= read -r line; do echo "::error::$(printf '%s' "$line" | sed 's/%/%25/g')"; done
@@ -468,7 +464,6 @@ jobs:
         ${{ env.CLANGD_DIR }}/LICENSE.TXT
         ${{ env.CLANGD_DIR }}/bin/clangd-indexer${{ matrix.config.exe }}
         ${{ env.CLANGD_DIR }}/bin/clangd-index-server${{ matrix.config.exe }}
-        ${{ env.CLANGD_DIR }}/bin/clangd-index-server-monitor${{ matrix.config.exe }}
         ${{ env.CLANGD_DIR }}/lib/clang
     - name: Archive clangd PDB symbols
       if: runner.os == 'Windows'
@@ -516,7 +511,7 @@ jobs:
         set -euo pipefail
         tag='${{ needs.prepare.outputs.tag_name }}'
         dir="clangd_${tag}"
-        bins="clangd clangd-indexer clangd-index-server clangd-index-server-monitor"
+        bins="clangd clangd-indexer clangd-index-server"
         for arch in x86_64 arm64; do
           zip="slices/clangd-macos-${arch}/clangd-macos-${arch}-${tag}.zip"
           mkdir -p "in-${arch}"
@@ -536,8 +531,7 @@ jobs:
         cd out
         zip -q -r "../clangd-macos-${tag}.zip" "${dir}/LICENSE.TXT" "${dir}/bin/clangd" "${dir}/lib/clang"
         zip -q -r "../clangd_indexing_tools-macos-${tag}.zip" "${dir}/LICENSE.TXT" \
-          "${dir}/bin/clangd-indexer" "${dir}/bin/clangd-index-server" \
-          "${dir}/bin/clangd-index-server-monitor" "${dir}/lib/clang"
+          "${dir}/bin/clangd-indexer" "${dir}/bin/clangd-index-server" "${dir}/lib/clang"
         unzip -l "../clangd-macos-${tag}.zip" | tail -3
     - name: Upload clangd artifact
       uses: actions/upload-artifact@v7
