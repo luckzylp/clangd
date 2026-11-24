@@ -151,13 +151,13 @@ jobs:
           # few libm symbols that would otherwise be versioned higher via
           # lib_compat.h, link libstdc++/libgcc statically, and force the static
           # libz.a so nothing new leaks into the dynamic dependency list.
+          # No Launchpad PPA here: ppa:git-core periodically drops old series,
+          # and when the focal pocket disappears apt-get update fails the whole
+          # job. focal's git 2.25 is enough for what the build needs.
           preinstall: >-
             apt-get update &&
             apt-get install -y ninja-build libz-dev libc-ares-dev wget clang-12
-            software-properties-common p7zip-full curl binutils python3 &&
-            add-apt-repository ppa:git-core/ppa &&
-            apt-get update &&
-            apt-get install -y git python3.8 python3.8-dev
+            git p7zip-full curl binutils python3 python3.8 python3.8-dev
           # focal ships CMake 3.16, the Kitware bionic repo tops out at 3.25.2
           # and current LLVM wants >= 3.31, so install a pinned CMake instead.
           cmake_url: https://github.com/Kitware/CMake/releases/download/v3.31.6/cmake-3.31.6-linux-x86_64.tar.gz
@@ -274,8 +274,12 @@ jobs:
             "-DCMAKE_OSX_DEPLOYMENT_TARGET=10.13"
             "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"
             "-DCMAKE_PREFIX_PATH=$HOME/grpc-installation"
+          # macOS ships zlib in the SDK, and gRPC's bundled copy does not
+          # compile against the macOS 15 SDK (zutil.c blows up inside
+          # _stdio.h). Use the system one instead of building zlib.
           grpc_cmake: >-
             "-DOPENSSL_NO_ASM=ON"
+            "-DgRPC_ZLIB_PROVIDER=package"
           exe: ""
         - name: macos-arm64
           os: macos-15
@@ -292,6 +296,7 @@ jobs:
             "-DCMAKE_PREFIX_PATH=$HOME/grpc-installation"
           grpc_cmake: >-
             "-DOPENSSL_NO_ASM=ON"
+            "-DgRPC_ZLIB_PROVIDER=package"
           exe: ""
     steps:
     - name: Clone build scripts
@@ -373,7 +378,9 @@ jobs:
       run: |
         set +e
         if [ ! -f grpc-build/build.ninja ]; then
-          echo "::error::gRPC configure failed (no grpc-build/build.ninja was produced)"
+          # A failure in an earlier step (Install tools, Clone gRPC) also lands
+          # here, so this is a hint, not the root cause.
+          echo "::warning::no grpc-build/build.ninja - gRPC configure did not complete"
           exit 0
         fi
         ninja -C grpc-build install 2>&1 |
@@ -442,8 +449,8 @@ jobs:
       shell: bash
       run: |
         set +e
-        if [ ! -f "$CLANGD_DIR/build.ninja" ]; then
-          echo "::error::LLVM configure failed (no build.ninja in ${CLANGD_DIR})"
+        if [ -z "${CLANGD_DIR:-}" ] || [ ! -f "$CLANGD_DIR/build.ninja" ]; then
+          echo "::warning::no LLVM build.ninja (CLANGD_DIR=${CLANGD_DIR:-unset}) - configure did not complete"
           exit 0
         fi
         ninja -C "$CLANGD_DIR" clangd clangd-indexer clangd-index-server \
