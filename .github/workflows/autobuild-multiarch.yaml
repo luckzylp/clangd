@@ -570,6 +570,8 @@ jobs:
     permissions:
       contents: write
     steps:
+    - name: Clone build scripts
+      uses: actions/checkout@v5
     - name: Download artifacts
       uses: actions/download-artifact@v8
       with:
@@ -587,14 +589,20 @@ jobs:
       run: |
         set -euo pipefail
         ls -l dist
-        notes="Unstable snapshot of clangd on ${RELEASE_DATE}.
-
-        Built from ${LLVM_REPO}@${LLVM_COMMIT}."
+        # The changelog lives in release-notes.md so the build environment and
+        # the differences from autobuild.yaml can be reviewed like any other
+        # change. GRPC_VERSION comes from the workflow-level env.
+        sed -e "s|{{DATE}}|${RELEASE_DATE}|g" \
+            -e "s|{{LLVM_REPO}}|${LLVM_REPO}|g" \
+            -e "s|{{LLVM_COMMIT}}|${LLVM_COMMIT}|g" \
+            -e "s|{{GRPC_VERSION}}|${GRPC_VERSION}|g" \
+            .github/workflows/release-notes.md > notes.md
         if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-          # Re-run on the same day: keep the tag, replace the assets.
+          # Re-run on the same day: keep the tag, replace the assets and notes.
           gh release upload "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --clobber
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --notes-file notes.md
         else
           gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" \
-            --title "$RELEASE_NAME" --notes "$notes" --draft --prerelease
+            --title "$RELEASE_NAME" --notes-file notes.md --draft --prerelease
         fi
         gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false
