@@ -5,7 +5,8 @@
 #
 #   linux-x86_64    built inside an Ubuntu 20.04 container, using exactly the
 #                   same old-glibc scheme as autobuild.yaml:
-#                     - lib_compat.h pins the libm symbols to GLIBC_2.2.5
+#                     - lib_compat.h pins the libm symbols to the arch
+#                       baseline: GLIBC_2.2.5 on x86_64, GLIBC_2.17 on arm64
 #                     - -static-libgcc + LLVM_STATIC_LINK_CXX_STDLIB=ON
 #                     - LLVM_ENABLE_ZLIB=FORCE_ON with linux-static-deps.cmake
 #                       forcing the static libz.a
@@ -18,7 +19,9 @@
 #                   GLIBC_2.18 only added __cxa_thread_atexit_impl, which is a
 #                   weak reference, so the resulting binary still runs on
 #                   systems with glibc 2.17.
-#   linux-aarch64   built natively on an Ubuntu 24.04 arm64 runner.
+#   linux-aarch64   built inside an Ubuntu 20.04 arm64 container, with the
+#                   same scheme; lib_compat.h pins to GLIBC_2.17 instead,
+#                   because aarch64 only exists since 2.17.
 #   windows-x86_64  built natively with MSVC on windows-2022.
 #   (winarm64 is disabled: the arm64 MSVC shipped by the VS2026 image hits
 #    compiler defect C1001 on this tree. See the note in the matrix.)
@@ -28,11 +31,14 @@
 #                   build on one host leaves BoringSSL with fat archives
 #                   containing objects for the wrong architecture.
 #
-# Builds are published as workflow artifacts. When `release_tag` is given, a
-# single short job at the end attaches them to a GitHub release. Doing the
-# upload in a separate job (instead of from each long-running build job)
-# avoids the "token expired after one hour" problem that release uploads from
-# multi-hour build jobs run into.
+# Artifacts are uploaded by each build job and then attached to a GitHub
+# release by one short job at the end: tag snapshot_<date>, title
+# "<date> @<sha12>", body "Unstable snapshot of clangd on <date>." plus the
+# LLVM commit - the same shape autobuild.yaml publishes. It is created as a
+# draft and published once every asset is uploaded, so a failed run never
+# leaves a half-populated public release; uploading from one short job also
+# avoids the "token expired after one hour" problem of uploading from
+# multi-hour build jobs.
 #
 # Asset naming note: assets that would collide with the winget publishing
 # workflow (which looks for `clangd-windows-*.zip`) are kept unique. Only the
@@ -61,7 +67,7 @@ on:
         required: false
         default: ''
       release_tag:
-        description: 'Publish a GitHub release under this tag (default: artifacts only)'
+        description: 'Release tag and artifact name suffix (default: snapshot_<date>)'
         required: false
         default: ''
       release_name:
@@ -99,7 +105,7 @@ jobs:
       llvm_repo: ${{ steps.resolve.outputs.llvm_repo }}
       llvm_commit: ${{ steps.resolve.outputs.llvm_commit }}
       tag_name: ${{ steps.resolve.outputs.tag_name }}
-      release_tag: ${{ steps.resolve.outputs.release_tag }}
+      release_date: ${{ steps.resolve.outputs.release_date }}
       release_name: ${{ steps.resolve.outputs.release_name }}
     steps:
     - name: Resolve repository, commit and tag
@@ -132,7 +138,7 @@ jobs:
           echo "llvm_repo=${repo}"
           echo "llvm_commit=${commit}"
           echo "tag_name=${tag}"
-          echo "release_tag=${INPUT_RELEASE_TAG:-}"
+          echo "release_date=${date}"
           echo "release_name=${name}"
         } >>"$GITHUB_OUTPUT"
         cat "$GITHUB_OUTPUT"
@@ -184,32 +190,38 @@ jobs:
           exe: ""
         - name: linux-aarch64
           os: ubuntu-24.04-arm
+          container: ubuntu:20.04
+          # Same old-glibc scheme as linux-x86_64, now for arm64: focal's glibc
+          # is 2.31 while the target baseline is 2.17 (aarch64 was added in
+          # 2.17, so that is the oldest version any aarch64 symbol can have),
+          # and the gap is closed the same way - forced symbol versions, static
+          # libstdc++/libgcc, static libz - instead of shipping a binary that
+          # needs whatever glibc the runner happens to have. clang-12, libz and
+          # c-ares are all published for focal/arm64.
           preinstall: >-
-            sudo apt-get update &&
-            sudo apt-get install -y ninja-build zlib1g-dev libstdc++-13-dev
-            p7zip-full clang-18 python3 curl
-          # Noble ships CMake 3.28, below the 3.31 LLVM now requires.
+            apt-get update &&
+            apt-get install -y ninja-build libz-dev libc-ares-dev wget clang-12
+            git p7zip-full curl binutils python3 python3.8 python3.8-dev
           cmake_url: https://github.com/Kitware/CMake/releases/download/v3.31.6/cmake-3.31.6-linux-aarch64.tar.gz
-          cflags: -O3 -gline-tables-only -DNDEBUG
-          # gRPC's CMake config looks up absl / c-ares / re2 / protobuf in
-          # config mode without REQUIRED, so a miss surfaces later as
-          # "link interface contains absl::strings but the target was not
-          # found" inside gRPCTargets.cmake. Point CMAKE_PREFIX_PATH at the
-          # gRPC install prefix so every sibling dependency resolves.
+          # COMPAT_SYMBOL_VERSION=GLIBC_2.17 rather than the x86_64 default:
+          # aarch64 has no symbols older than 2.17. CMAKE_PREFIX_PATH points
+          # at the gRPC install prefix so its config-mode lookups of absl /
+          # c-ares / re2 / protobuf (made without REQUIRED) resolve.
+          cflags: -O3 -gline-tables-only -DNDEBUG -DCOMPAT_SYMBOL_VERSION=GLIBC_2.17 -include $GITHUB_WORKSPACE/.github/workflows/lib_compat.h
           cmake: >-
-            "-DCMAKE_C_COMPILER=clang-18"
-            "-DCMAKE_CXX_COMPILER=clang++-18"
-            "-DCMAKE_EXE_LINKER_FLAGS_RELEASE=-static-libgcc -Wl,--compress-debug-sections=zlib"
+            "-DCMAKE_C_COMPILER=clang-12"
+            "-DCMAKE_CXX_COMPILER=clang++-12"
+            "-DCMAKE_EXE_LINKER_FLAGS_RELEASE=-static-libgcc -Wl,--compress-debug-sections=zlib $GITHUB_WORKSPACE/getentropy_compat.o"
             "-DLLVM_STATIC_LINK_CXX_STDLIB=ON"
             "-DLLVM_ENABLE_ZLIB=FORCE_ON"
             "-DCMAKE_PROJECT_INCLUDE=$GITHUB_WORKSPACE/.github/workflows/linux-static-deps.cmake"
             "-DCMAKE_PREFIX_PATH=$HOME/grpc-installation"
-          # Same gRPC release as every other target (env.GRPC_VERSION); the
-          # natively built c-ares/re2/zlib it installs are picked up through
-          # CMAKE_PREFIX_PATH above.
           grpc_cmake: >-
             "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"
+          # Same whitelist as the x86_64 target and autobuild.yaml.
+          compat_lib: GLIBC_2.18
           exe: ""
+
         - name: windows-x86_64
           os: windows-2022
           # No nasm: BoringSSL only needs it when assembly is enabled (see
@@ -357,7 +369,7 @@ jobs:
     # libm symbols in lib_compat.h there is no older version of getentropy to
     # force, so link a local definition instead; see getentropy_compat.c.
     - name: Build old-glibc compat stubs
-      if: matrix.config.name == 'linux-x86_64'
+      if: matrix.config.compat_lib != ''
       shell: bash
       run: |
         set -euo pipefail
@@ -501,7 +513,7 @@ jobs:
     # version in lib_compat.h, or stop using the feature that pulls the newer
     # symbol in.
     - name: Check binary compatibility
-      if: matrix.config.name == 'linux-x86_64'
+      if: matrix.config.compat_lib != ''
       shell: bash
       run: >
         python3 .github/workflows/lib_compat_test.py
@@ -546,10 +558,14 @@ jobs:
         path: clangd-debug-symbols-${{ matrix.config.name }}-${{ needs.prepare.outputs.tag_name }}.7z
         if-no-files-found: error
 
+  # Mirrors what autobuild.yaml publishes: tag snapshot_<date>, title
+  # "<date> @<sha12>", body "Unstable snapshot of clangd on <date>." plus the
+  # LLVM commit. Created as a draft and published only after every asset is
+  # uploaded, so a failed upload never leaves a half-populated public release.
   release:
     name: Publish release
     needs: [prepare, build]
-    if: always() && needs.prepare.outputs.release_tag != '' && needs.build.result == 'success'
+    if: always() && needs.build.result == 'success'
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -563,24 +579,22 @@ jobs:
       shell: bash
       env:
         GH_TOKEN: ${{ secrets.RELEASE_TOKEN || secrets.GITHUB_TOKEN }}
-        TAG: ${{ needs.prepare.outputs.release_tag }}
+        TAG: ${{ needs.prepare.outputs.tag_name }}
         RELEASE_NAME: ${{ needs.prepare.outputs.release_name }}
+        RELEASE_DATE: ${{ needs.prepare.outputs.release_date }}
         LLVM_REPO: ${{ needs.prepare.outputs.llvm_repo }}
         LLVM_COMMIT: ${{ needs.prepare.outputs.llvm_commit }}
       run: |
         set -euo pipefail
         ls -l dist
-        notes="Built from ${LLVM_REPO}@${LLVM_COMMIT}.
+        notes="Unstable snapshot of clangd on ${RELEASE_DATE}.
 
-        | target | notes |
-        | --- | --- |
-        | linux-x86_64 | built with lib_compat.h, runs on glibc 2.17+ |
-        | linux-aarch64 | built on Ubuntu 24.04 |
-        | windows-x86_64 | MSVC, static CRT |
-        | macos | arm64, macOS 15 SDK, deployment target 11.0 |"
+        Built from ${LLVM_REPO}@${LLVM_COMMIT}."
         if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+          # Re-run on the same day: keep the tag, replace the assets.
           gh release upload "$TAG" dist/* --repo "$GITHUB_REPOSITORY" --clobber
         else
           gh release create "$TAG" dist/* --repo "$GITHUB_REPOSITORY" \
-            --title "$RELEASE_NAME" --notes "$notes" --prerelease
+            --title "$RELEASE_NAME" --notes "$notes" --draft --prerelease
         fi
+        gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false
